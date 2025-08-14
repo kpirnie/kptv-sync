@@ -3,9 +3,18 @@
 # import the database class
 from db.db import KP_DB, ComparisonOperator, WhereClause
 
+# Import debug utilities
+try:
+    from utils.debug import debug_print_sync, debug_print_db
+except ImportError:
+    def debug_print_sync(msg): pass
+    def debug_print_db(msg): pass
+
 class KP_Sync_Data:
 
     def __init__( self ):
+
+        debug_print_sync("Initializing KP_Sync_Data")
 
         # setup the cache we're going to use
         from utils.cache import KP_Cache
@@ -14,53 +23,77 @@ class KP_Sync_Data:
         # hold the cache keys
         self.cache_key_prov = "sync_providers"
         self.cache_key_filt = "sync_filters_%d"
+        
+        debug_print_sync("KP_Sync_Data initialization completed")
 
     # update the providers last synced date
     def _update_last_synced( self, provider: int ):
+
+        debug_print_db(f"Updating last synced time for provider: {provider}")
 
         # with our database class
         with KP_DB( ) as db:
 
             db.call_proc( "Provider_Update_Refreshed", args=[provider], fetch=False )
+            
+        debug_print_db(f"Last synced time updated for provider: {provider}")
 
     # clean up the records in the database
     def _cleanup( self ):
+
+        debug_print_db("Running database cleanup operations")
 
         # with our database class
         with KP_DB( ) as db:
 
             # execute the cleanup
             db.call_proc( "Streams_CleanUp", None, False )
+            
+        debug_print_db("Database cleanup completed")
 
     # fixup the records in the database
     def _fixup( self ):
+
+        debug_print_db("Running database fixup operations")
 
         # with our database class
         with KP_DB( ) as db:
 
             # execute the cleanup
             db.call_proc( "Streams_FixUp", None, False )
+            
+        debug_print_db("Database fixup completed")
     
     # sync the streams
     def _sync_the_streams( self ):
+
+        debug_print_db("Syncing streams from temp table to main table")
 
         # with our database class
         with KP_DB( ) as db:
 
             # call the sync sproc
             db.call_proc( "Streams_All_Sync", None, False )
+            
+        debug_print_db("Stream sync completed")
 
     # insert the streams into the temp table
     def _insert_the_streams( self, streams ):
+
+        debug_print_db(f"Inserting {len(streams)} streams into temp table")
 
         # with our database class
         with KP_DB( ) as db:
         
             # insert the streams
             db.insert_many( 'stream_temp', streams, batch_size=2500 )
+            
+        debug_print_db(f"Successfully inserted {len(streams)} streams into temp table")
           
     # get the providers list
     def _get_providers( self, _provider: int = 0 ):
+
+        debug_print_sync(f"Getting providers list (specific provider: {_provider})")
 
         # hold a return
         _ret = []
@@ -71,6 +104,8 @@ class KP_Sync_Data:
         # if it's not in the cache yet
         if _ret is None:
 
+            debug_print_sync("Providers not in cache, fetching from database")
+
             # with our database class
             with KP_DB( ) as db:
 
@@ -80,6 +115,7 @@ class KP_Sync_Data:
                 # if we have a specific provider
                 if _provider is not None and _provider != 0:
 
+                    debug_print_sync(f"Filtering for specific provider ID: {_provider}")
                     # setup the where clause
                     where = [
                         WhereClause(
@@ -103,14 +139,20 @@ class KP_Sync_Data:
                         'sp_last_synced'], 
                         where=where )
 
+            debug_print_sync(f"Retrieved {len(_ret)} providers from database")
+
             # set the item in the cache
             self.cache.set( self.cache_key_prov, _ret )
+        else:
+            debug_print_sync(f"Retrieved {len(_ret)} providers from cache")
 
         # return the providers
         return _ret
 
     # get the filters
     def _get_filters( self, uid: int ):
+
+        debug_print_sync(f"Getting filters for user ID: {uid}")
 
         # hold a return
         _ret = []
@@ -123,6 +165,8 @@ class KP_Sync_Data:
 
         # if we don't have the filters in the cache
         if _ret is None:
+
+            debug_print_sync("Filters not in cache, fetching from database")
 
             # setup the where clause
             where = [
@@ -146,11 +190,15 @@ class KP_Sync_Data:
                             columns=['id', 'sf_filter', 'sf_type_id'],
                             where=where )
 
+            debug_print_sync(f"Retrieved {len(_ret)} filters from database for user {uid}")
+
             # clean up
             del where
 
             # set the item in the cache
             self.cache.set( _ckey, _ret )
+        else:
+            debug_print_sync(f"Retrieved {len(_ret)} filters from cache for user {uid}")
 
         # return the filters
         return _ret

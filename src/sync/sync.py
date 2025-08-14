@@ -7,6 +7,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import time
 
+# Import debug utilities
+try:
+    from utils.debug import debug_print_sync
+except ImportError:
+    def debug_print_sync(msg): pass
+
 # our sync class
 class KP_Sync:
 
@@ -17,16 +23,21 @@ class KP_Sync:
         from common.common import KP_Common
         self.common = KP_Common( )
 
+        debug_print_sync("Initializing KP_Sync")
+
         # Thread pool configuration
         cpu_count = os.cpu_count( ) or 1
         default_threads = min( 8, max( 4, cpu_count * 2 ) )  # Better default range
         self.max_threads = self._determine_thread_count( max_threads, default_threads )
+        
+        debug_print_sync(f"Using {self.max_threads} threads for sync operations")
         
         # Initialize components
         from utils.cache import KP_Cache
         _cache = KP_Cache( )
 
         # clear our cache
+        debug_print_sync("Clearing cache")
         _cache.clear( )
         del _cache
 
@@ -38,14 +49,20 @@ class KP_Sync:
         self._thread_lock = threading.Lock( )
         self._db_lock = threading.Lock( )
 
+        debug_print_sync("KP_Sync initialization completed")
+
     # our main public sync function
     def sync( self ):
+        
+        debug_print_sync("Starting sync operation")
         
         # get our providers, and make sure we have some before proceeding
         _providers = self._data._get_providers( self.common.args.provider )
         if not _providers:
             self.common.kp_print( "error", "No providers found" )
             sys.exit( 1 )
+
+        debug_print_sync(f"Found {len(_providers)} providers to process")
 
         # Show initial sync message
         self.common.kp_print_line( )
@@ -62,12 +79,16 @@ class KP_Sync:
         results = []
         has_errors = False
         
+        debug_print_sync("Starting thread pool execution")
+        
         # with our thread executor
         with ThreadPoolExecutor( max_workers=self.max_threads ) as executor:
 
             # setup the executions we're taking
             futures = {executor.submit( self._process_provider, prov ): prov['sp_name'] 
                       for prov in _providers}
+            
+            debug_print_sync(f"Submitted {len(futures)} provider processing tasks")
             
             # for each completed action: 1 hour timeout
             for future in as_completed( futures, timeout=3600 ):
@@ -79,6 +100,8 @@ class KP_Sync:
                     # setup the results
                     total, filtered, name, error = res
 
+                    debug_print_sync(f"Provider {name} completed: {filtered}/{total} streams, error: {error}")
+
                     # oofff... if we have an error
                     if error:
 
@@ -89,25 +112,35 @@ class KP_Sync:
                     # append our results
                     results.append( ( total, filtered, name, error ) )
 
+        debug_print_sync("Thread pool execution completed")
+
         # Final operations
         try:
+
+            debug_print_sync("Starting final database operations")
 
             # utilize the database thread locker
             with self._db_lock:
 
                 # sync the streams
+                debug_print_sync("Syncing streams to database")
                 self._data._sync_the_streams( )
 
                 # clean up the streams
+                debug_print_sync("Cleaning up streams")
                 self.cleanup( )
 
                 # attempt to fix up some data in the streams
+                debug_print_sync("Running fixup operations")
                 self.fixup( )
+
+            debug_print_sync("Final database operations completed")
 
         # yikes, there was an error
         except Exception as e:
             has_errors = True
             self.common.kp_print( "error", f"Final operations failed: {str(e)}" )
+            debug_print_sync(f"Final operations error: {e}")
 
         # Show final summary
         self._print_final_summary( results, time.time( ) - start_time, has_errors )
@@ -115,12 +148,14 @@ class KP_Sync:
     # clean up the data
     def cleanup( self ):
         
+        debug_print_sync("Running cleanup operations")
         # run it
         self._data._cleanup( )
 
     # fixup the data
     def fixup( self ):
 
+        debug_print_sync("Running fixup operations")
         # run it
         self._data._fixup( )
 
@@ -131,62 +166,87 @@ class KP_Sync:
         if max_threads is not None:
 
             # return a default
-            return max( 1, min( int( max_threads ), 16 ) )
+            thread_count = max( 1, min( int( max_threads ), 16 ) )
+            debug_print_sync(f"Using configured thread count: {thread_count}")
+            return thread_count
         
         # otherwise, return the set default
+        debug_print_sync(f"Using default thread count: {default}")
         return default
 
+    # process a provider
     def _process_provider( self, _prov ):
+
+        debug_print_sync(f"Processing provider: {_prov['sp_name']}")
+
+        # try to process
         try:
-            # Get filters
+
+            # with our database thread lockers
             with self._db_lock:
+
+                debug_print_sync(f"Getting filters for provider {_prov['sp_name']}")
+                # try to grab the users filters
                 _filters = self._data._get_filters( _prov["u_id"] )
                 if _filters is None:
+                    debug_print_sync(f"No filters found for provider {_prov['sp_name']}")
                     return ( 0, 0, _prov['sp_name'], "No filters found" )
+
+                debug_print_sync(f"Found {len(_filters)} filters for provider {_prov['sp_name']}")
 
             # Get and process streams
             from sync.get import KP_Get
             _get = KP_Get( )
 
+            debug_print_sync(f"Fetching streams for provider {_prov['sp_name']}")
             # get the streams from the provider
             _streams = _get.get_streams( _prov )
-            #print(f"SYNC: Got {len(_streams)} streams from get_streams()")
+            
+            debug_print_sync(f"Retrieved {len(_streams)} streams for {_prov['sp_name']}")
             
             # setup the filtering
             from sync.filter import KP_Filter
 
+            debug_print_sync(f"Applying filters to streams for {_prov['sp_name']}")
             # filter the streams
             _filtered_streams = KP_Filter.filter_streams( _streams, _filters )
-            #print(f"SYNC: After filtering: {len(_filtered_streams)} streams remain")
+
+            debug_print_sync(f"Filtered to {len(_filtered_streams)} streams for {_prov['sp_name']}")
 
             # now convert them to our common format
             _converted_streams = self._convert_streams( _filtered_streams, _prov )
-            #print(f"SYNC: After conversion: {len(_converted_streams)} streams to insert")
+            
+            debug_print_sync(f"Converted {len(_converted_streams)} streams for {_prov['sp_name']}")
             
             # make sure we actually have converted streams
             if _converted_streams:
+
                 # with out database lock
                 with self._db_lock:
+
+                    debug_print_sync(f"Inserting streams to database for {_prov['sp_name']}")
                     # insert the streams
                     self._data._insert_the_streams( _converted_streams )
-                    #print(f"SYNC: Successfully inserted {len(_converted_streams)} streams")
 
+                    debug_print_sync(f"Updating last synced time for {_prov['sp_name']}")
                     # update the last synced
                     self._data._update_last_synced( _prov["u_id"] )
-            #else:
-            #    print("SYNC: No converted streams to insert!")
             
+            debug_print_sync(f"Provider {_prov['sp_name']} processing completed successfully")
             # return the streams
             return ( len( _streams ), len( _converted_streams ), _prov['sp_name'], None )
             
+        # whoops... 
         except Exception as e:
-            import traceback
-            traceback.print_exc()
+            debug_print_sync(f"Provider {_prov['sp_name']} processing failed: {e}")
             return ( 0, 0, _prov['sp_name'], str( e ) )
 
     # setup and format the final "report"
     def _print_final_summary( self, results, total_time, has_errors ):
 
+        # THIS IS THE ONLY OUTPUT THAT SHOULD SHOW WITHOUT --debug
+        # Keep this visible for users
+        
         self.common.kp_print_line( )
         self.common.kp_print("info", "SYNC SUMMARY")
         self.common.kp_print_line( )
@@ -225,7 +285,7 @@ class KP_Sync:
         
         # if we had errors
         if has_errors:
-            self.common.kp_print( "warning", "SYNC COMPLETED WITH ERRORS" )
+            self.common.kp_print( "warn", "SYNC COMPLETED WITH ERRORS" )
 
         # otherwise
         else:
@@ -236,8 +296,10 @@ class KP_Sync:
     # convert our streams to a standardized format
     def _convert_streams( self, streams, provider ):
 
+        debug_print_sync(f"Converting {len(streams)} streams for provider {provider['sp_name']}")
+
         # return the formatted streams        
-        return [{
+        converted = [{
             'u_id': provider['u_id'],
             'p_id': provider['id'],
             's_orig_name': stream['stream_name'],
@@ -248,4 +310,6 @@ class KP_Sync:
             's_extras': '',
             's_group': stream['stream_group'],
         } for _, stream in streams.items( )]
-
+        
+        debug_print_sync(f"Converted {len(converted)} streams successfully")
+        return converted

@@ -24,6 +24,14 @@ class KP_Common:
         self.args = None
         self.__handle_args( )
 
+        # Set debug state for the entire application
+        try:
+            from utils.debug import set_debug
+            set_debug(self.args.debug if self.args else False)
+        except ImportError:
+            # Debug utils not available, skip
+            pass
+
         # hold our common variables
         self.api_live = "%s/player_api.php?username=%s&password=%s&action=get_live_streams"
         self.api_series = "%s/player_api.php?username=%s&password=%s&action=get_series"

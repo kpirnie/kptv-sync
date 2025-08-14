@@ -1,19 +1,36 @@
 #!/usr/bin/env python3
 
-import os
-os.environ['LC_ALL'] = 'en_US.UTF-8'
-os.environ['LANG'] = 'en_US.UTF-8'
-
 # Common imports
-import pymysql
-import pymysql.cursors
+import os
 from typing import Iterator, Optional, Union, Dict, List, Any, Tuple, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
-import threading
-import queue
-import time
+
+# PyMySQL imports
+try:
+    import pymysql
+    from pymysql import Error
+except ImportError:
+    raise ImportError("PyMySQL is required. Please install it with: pip install PyMySQL")
+
+# Set locale - handle systems that don't have en_US.UTF-8
+try:
+    os.environ['LANG'] = 'en_US.UTF-8'
+except:
+    try:
+        os.environ['LANG'] = 'C.UTF-8'
+    except:
+        # Fallback to C locale
+        os.environ['LANG'] = 'C'
+
+# Import debug utilities
+try:
+    from utils.debug import debug_print_db
+except ImportError:
+    def debug_print_db(msg): pass
+
+debug_print_db("Using PyMySQL for database connections")
 
 # Define enums for join types
 class JoinType( Enum ):
@@ -89,77 +106,22 @@ class OrderByClause:
     column: str
     direction: str = "ASC"
 
-# Simple connection pool implementation for PyMySQL
+# Simple connection pool for PyMySQL
 class PyMySQLConnectionPool:
-    def __init__(self, pool_name: str, pool_size: int, **kwargs):
-        self.pool_name = pool_name
-        self.pool_size = pool_size
-        self.connection_kwargs = kwargs
-        self._pool = queue.Queue(maxsize=pool_size)
-        self._lock = threading.Lock()
-        self._created_connections = 0
+    def __init__(self, **kwargs):
+        self.connection_params = kwargs
+        self.pool_name = kwargs.get('pool_name', 'default')
         
-        # Pre-populate the pool
-        for _ in range(pool_size):
-            self._create_connection()
-    
-    def _create_connection(self):
-        """Create a new connection and add it to the pool"""
-        try:
-            conn = pymysql.connect(**self.connection_kwargs)
-            self._pool.put(conn, block=False)
-            self._created_connections += 1
-        except queue.Full:
-            # Pool is full, close the connection
-            if conn:
-                conn.close()
-        except Exception as e:
-            raise ConnectionError(f"Failed to create connection: {e}")
-    
     def get_connection(self):
-        """Get a connection from the pool"""
-        try:
-            # Try to get a connection from the pool (non-blocking)
-            conn = self._pool.get(block=False)
-            
-            # Check if connection is still alive
-            if not self._is_connection_alive(conn):
-                conn.close()
-                # Create a new connection
-                conn = pymysql.connect(**self.connection_kwargs)
-            
-            return conn
-        except queue.Empty:
-            # Pool is empty, create a new connection
-            return pymysql.connect(**self.connection_kwargs)
-    
-    def return_connection(self, conn):
-        """Return a connection to the pool"""
-        if self._is_connection_alive(conn):
-            try:
-                self._pool.put(conn, block=False)
-            except queue.Full:
-                # Pool is full, close the connection
-                conn.close()
-        else:
-            conn.close()
-    
-    def _is_connection_alive(self, conn):
-        """Check if a connection is still alive"""
-        try:
-            conn.ping(reconnect=False)
-            return True
-        except:
-            return False
-    
-    def close_all(self):
-        """Close all connections in the pool"""
-        while not self._pool.empty():
-            try:
-                conn = self._pool.get(block=False)
-                conn.close()
-            except queue.Empty:
-                break
+        return pymysql.connect(
+            host=self.connection_params['host'],
+            port=self.connection_params['port'],
+            user=self.connection_params['user'],
+            password=self.connection_params['password'],
+            database=self.connection_params['database'],
+            charset='utf8mb4',
+            autocommit=False
+        )
 
 # Main database class
 class KP_DB:
@@ -169,6 +131,9 @@ class KP_DB:
 
         # import our common module
         from config.config import DBSERVER, DBPORT, DBUSER, DBPASSWORD, DBSCHEMA, DB_TBLPREFIX
+
+        debug_print_db(f"Initializing PyMySQL database connection")
+        debug_print_db(f"Server: {DBSERVER}:{DBPORT}, Database: {DBSCHEMA}, User: {DBUSER}")
 
         # set the class variables
         self.host = DBSERVER
@@ -181,14 +146,16 @@ class KP_DB:
         self.chunk_size = chunk_size
         self.connection_pool = self._initialize_pool( )
 
+        debug_print_db(f"PyMySQL database connection initialized successfully")
+
     # destructor to close the connection pool when we're done
     def __del__( self ):
 
         # if we have a connection pool
         if hasattr( self, 'connection_pool' ) and self.connection_pool is not None:
-
-            # close all connections in the pool
-            self.connection_pool.close_all()
+            debug_print_db("Closing database connection pool")
+            # nullify the connection pool
+            del self.connection_pool
             self.connection_pool = None
 
     # context manager to handle the connection pool
@@ -200,33 +167,51 @@ class KP_DB:
 
         # if we have a connection pool
         if hasattr( self, 'connection_pool' ) and self.connection_pool is not None:
-
-            # close all connections in the pool
-            self.connection_pool.close_all()
+            debug_print_db("Closing database connection pool (context manager)")
+            # nullify the connection pool
+            del self.connection_pool
             self.connection_pool = None
 
     # initialize the connection pool
-    def _initialize_pool( self ) -> PyMySQLConnectionPool:
+    def _initialize_pool( self ):
 
         # create the connection pool
         try:
+            debug_print_db(f"Creating PyMySQL connection pool")
 
-            # create the connection pool with the provided configuration and return it
-            return PyMySQLConnectionPool(
+            pool = PyMySQLConnectionPool(
                 pool_name="kptv_db_pool",
-                pool_size=self.pool_size,
                 host=self.host,
+                port=self.port,
                 database=self.database,
                 user=self.user,
-                password=self.password,
-                charset='utf8mb4',
-                autocommit=False,
-                cursorclass=pymysql.cursors.DictCursor
+                password=self.password
             )
+            
+            debug_print_db("PyMySQL connection pool created successfully")
+            return pool
         
         # if we run into an error, raise a connection error
         except Exception as e:
+            debug_print_db(f"Failed to create connection pool: {e}")
             raise ConnectionError( f"Failed to create connection pool: {e}" )
+
+    # get a connection from the pool
+    def _get_connection( self ):
+
+        # try to get a connection from the pool
+        try:
+
+            # hold it
+            conn = self.connection_pool.get_connection( )
+
+            debug_print_db("Successfully obtained PyMySQL connection from pool")
+            return conn
+                
+        # if there was an error
+        except Exception as e:
+            debug_print_db(f"Error getting connection from pool: {e}")
+            raise ConnectionError( f"Error getting connection from pool: {e}" )
 
     # context manager to handle the cursor
     @contextmanager
@@ -238,6 +223,7 @@ class KP_DB:
 
         # try to get a connection from the pool
         try:
+            debug_print_db("Getting connection from pool")
 
             # get a connection from the pool
             conn = self._get_connection( )
@@ -253,22 +239,29 @@ class KP_DB:
 
             # commit the changes
             conn.commit( )
+            debug_print_db("Transaction committed successfully")
 
         # if we run into an error, rollback the changes
         except Exception as e:
+            debug_print_db(f"Database error occurred, rolling back: {e}")
             if conn:
                 conn.rollback( )
             raise RuntimeError( f"Database error: {e}" )
         
-        # and finally, close the cursor and return connection to pool
+        # and finally, close the cursor and connection
         finally:
             if cursor:
                 cursor.close( )
             if conn:
-                self.connection_pool.return_connection(conn)
+                conn.close( )
+            debug_print_db("Cursor and connection closed")
 
     # execute a query with the cursor
     def _execute( self, query: str, params=None, fetch: bool = True, dictionary: bool = True, stream: bool = False ) -> Any:
+
+        debug_print_db(f"Executing query: {query[:100]}{'...' if len(query) > 100 else ''}")
+        if params:
+            debug_print_db(f"Query parameters: {params}")
 
         # if we're streaming results, we need to set the buffered flag to False
         if stream:
@@ -282,14 +275,18 @@ class KP_DB:
 
             # if we're not fetching results, return None
             if not fetch:
+                debug_print_db(f"Query executed, {cursor.rowcount} rows affected")
                 return None
             
             # if we're streaming results, return an iterator
             if stream:
+                debug_print_db("Returning streaming results")
                 return self._stream_results( cursor )
             
             # otherwise, fetch the results and return them
-            return cursor.fetchall( )
+            results = cursor.fetchall( )
+            debug_print_db(f"Query returned {len(results) if results else 0} rows")
+            return results
 
     # stream results from the cursor
     def _stream_results( self, cursor ) -> Iterator[Dict]:
@@ -304,6 +301,7 @@ class KP_DB:
             if not rows:
                 break
 
+            debug_print_db(f"Streaming {len(rows)} rows")
             # yield the rows
             yield from rows
 
@@ -313,6 +311,8 @@ class KP_DB:
         # if there are no where clauses, return an empty string and an empty list
         if not where:
             return "", []
+        
+        debug_print_db(f"Building WHERE clause with {len(where)} conditions")
         
         # setup the where clause and parameters
         where_parts = []
@@ -355,7 +355,9 @@ class KP_DB:
                 where_parts.append( f"{clause.connector} {where_str}" )
         
         # join the where parts and return the where clause and parameters
-        return " WHERE " + " ".join( where_parts ), where_params
+        where_clause = " WHERE " + " ".join( where_parts )
+        debug_print_db(f"Built WHERE clause: {where_clause}")
+        return where_clause, where_params
 
     # build the SELECT query with all options
     def _build_select_query( self, table: str, columns: List[str] = None, 
@@ -366,6 +368,8 @@ class KP_DB:
                           order_by: List[OrderByClause] = None,
                           limit: int = None, 
                           offset: int = None ) -> Tuple[str, List[Any]]:
+        
+        debug_print_db(f"Building SELECT query for table: {table}")
         
         # setup the columns to select
         cols = "*" if not columns else ", ".join( columns )
@@ -381,7 +385,7 @@ class KP_DB:
 
         # if there are any joins
         if joins:
-
+            debug_print_db(f"Adding {len(joins)} JOIN clauses")
             # loop them and add them to the query
             for join in joins:
                 query += f" {join}"
@@ -400,19 +404,19 @@ class KP_DB:
 
         # if we need to group by
         if group_by:
-
+            debug_print_db(f"Adding GROUP BY: {group_by}")
             # append to the query string
             query += f" GROUP BY {group_by}"
 
         # if we need HAVING
         if having:
-
+            debug_print_db(f"Adding HAVING: {having}")
             # append to the query string
             query += f" HAVING {having}"
 
         # if we need to order the query
         if order_by:
-
+            debug_print_db(f"Adding ORDER BY with {len(order_by)} clauses")
             # hold the clauses
             order_clauses = []
 
@@ -430,20 +434,24 @@ class KP_DB:
 
         # if we're limitting the return
         if limit is not None:
-
+            debug_print_db(f"Adding LIMIT: {limit}")
             # append it to the string
             query += f" LIMIT {limit}"
 
             # along with the offset if it exists
             if offset is not None:
+                debug_print_db(f"Adding OFFSET: {offset}")
                 query += f" OFFSET {offset}"
 
+        debug_print_db(f"Built query: {query}")
         # return the query and parameters
         return query, params
 
     # Transaction Support
     @contextmanager
     def transaction( self ):
+        
+        debug_print_db("Starting database transaction")
         
         # setup the connection
         conn = None
@@ -454,44 +462,27 @@ class KP_DB:
             # the connection
             conn = self._get_connection()
 
-            # yield the connection
+            # yield the connection pool
             yield conn
 
             # commit the transaction
             conn.commit( )
+            debug_print_db("Transaction committed successfully")
 
         # if there's an error
         except Exception as e:
+            debug_print_db(f"Transaction failed, rolling back: {e}")
 
             # roll back the transaction
             if conn:
                 conn.rollback( )
             raise
 
-        # and finally, return connection to pool
+        # and finally, close the connection
         finally:
             if conn:
-                self.connection_pool.return_connection(conn)
-    
-    # get a connection from the pool
-    def _get_connection( self ):
-
-        # try to get a connection from the pool
-        try:
-
-            # hold it
-            conn = self.connection_pool.get_connection( )
-
-            # double check that we actually have a connection and return it
-            if conn.open:
-                return conn
-            
-            # whoops...  error
-            raise ConnectionError( "Failed to establish database connection" )
-        
-        # if there was an error
-        except Exception as e:
-            raise ConnectionError( f"Error getting connection from pool: {e}" )
+                conn.close( )
+                debug_print_db("Transaction connection closed")
 
     # get a single record for the query
     def get_one( self, 
@@ -501,6 +492,8 @@ class KP_DB:
                 where: List[WhereClause] = None,
                 group_by: str = None, having: str = None,
                 order_by: List[OrderByClause] = None ) -> Optional[Dict]:
+        
+        debug_print_db(f"Getting single record from table: {table}")
         
         # setup the query and parameters
         query, params = self._build_select_query(
@@ -532,6 +525,8 @@ class KP_DB:
                 limit: int = None, offset: int = None,
                 stream: bool = False ) -> Union[List[Dict], Iterator[Dict]]:
         
+        debug_print_db(f"Getting all records from table: {table}")
+        
         # setup the query and the parameters
         query, params = self._build_select_query(
             table=table,
@@ -554,6 +549,8 @@ class KP_DB:
                    where: List[WhereClause] = None,
                    group_by: str = None, having: str = None,
                    order_by: List[OrderByClause] = None ) -> Iterator[List[Dict]]:
+        
+        debug_print_db(f"Getting chunked results from table: {table}")
         
         # hold the offset
         offset = 0
@@ -583,6 +580,7 @@ class KP_DB:
                 # break the loop
                 break
 
+            debug_print_db(f"Yielding chunk with {len(results)} records (offset: {offset})")
             # yield the results
             yield results
 
@@ -596,6 +594,8 @@ class KP_DB:
         if not data:
             raise ValueError( "No data provided for insert" )
             
+        debug_print_db(f"Inserting single record into table: {table}")
+        
         # setup the columns
         columns = ", ".join( data.keys( ) )
 
@@ -615,7 +615,9 @@ class KP_DB:
             cursor.execute( query, tuple( data.values( ) ) )
 
             # retur the last inserted id, or none
-            return cursor.lastrowid if return_id else None
+            inserted_id = cursor.lastrowid if return_id else None
+            debug_print_db(f"Insert completed, ID: {inserted_id}")
+            return inserted_id
 
     # insert many records
     def insert_many( self, table: str, data: List[Dict], return_ids: bool = False, ignore_duplicates: bool = True, batch_size: int = 1000 ) -> Optional[List[int]]:
@@ -623,6 +625,8 @@ class KP_DB:
         # if there's no data
         if not data:
             raise ValueError( "No data provided for insert" )
+
+        debug_print_db(f"Inserting {len(data)} records into table: {table} (batch_size: {batch_size})")
 
         # setup the columns
         columns = ", ".join( data[0].keys( ) )
@@ -645,6 +649,7 @@ class KP_DB:
 
                 # if we want to return the ids
                 if return_ids:
+                    debug_print_db("Performing individual inserts to track IDs")
 
                     # Individual inserts for accurate ID tracking
                     inserted_ids = []
@@ -662,18 +667,21 @@ class KP_DB:
                             inserted_ids.append( cursor.lastrowid )
 
                         # try to trap errors
-                        except pymysql.Error as e:
+                        except Exception as e:
 
                             # ignore duplicates
-                            if ignore_duplicates and e.args[0] == 1062:  # Duplicate key error
+                            if ignore_duplicates and ("Duplicate entry" in str(e) or "1062" in str(e)):
+                                debug_print_db(f"Ignoring duplicate key error for row")
                                 continue
                             raise
 
+                    debug_print_db(f"Individual inserts completed, {len(inserted_ids)} IDs returned")
                     # return the captured ids
                     return inserted_ids
 
                 # otherwise
                 else:
+                    debug_print_db("Performing batch inserts for better performance")
 
                     # Batch processing for better performance
                     values = [tuple( row.values( ) ) for row in data]
@@ -683,6 +691,7 @@ class KP_DB:
 
                         # setup a batch to run
                         batch = values[i:i + batch_size]
+                        debug_print_db(f"Processing batch {i//batch_size + 1}: {len(batch)} records")
 
                         # try to execute
                         try:
@@ -691,42 +700,47 @@ class KP_DB:
                             cursor.executemany( base_query, batch )
 
                         # trap errors
-                        except pymysql.Error as e:
+                        except Exception as e:
 
                             # if we're configured to ignore duplicate records
-                            if ignore_duplicates and e.args[0] == 1062:
+                            if ignore_duplicates and ("Duplicate entry" in str(e) or "1062" in str(e)):
+                                debug_print_db("Batch failed with duplicates, falling back to individual inserts")
 
                                 # Fall back to individual inserts for the failed batch
                                 for value in batch:
                                     try:
                                         cursor.execute( base_query, value )
-                                    except pymysql.Error as e:
-                                        if ignore_duplicates and e.args[0] == 1062:
+                                    except Exception as e:
+                                        if ignore_duplicates and ("Duplicate entry" in str(e) or "1062" in str(e)):
                                             continue
                                         raise
                              # otherwise raise an error
                             else:
                                 raise
+                    
+                    debug_print_db("Batch inserts completed successfully")
                     # return nothing
                     return None
         # trap errors
-        except pymysql.Error as e:
+        except Exception as e:
 
             # check if we're ignoring duplicates
-            if ignore_duplicates and e.args[0] == 1062:
+            if ignore_duplicates and ("Duplicate entry" in str(e) or "1062" in str(e)):
+                debug_print_db("Insert failed with duplicate key error (ignored)")
                 return [] if return_ids else None
             
             # otherwise... 
+            debug_print_db(f"Insert failed with error: {e}")
             raise RuntimeError( f"Database error during insert: {e}" ) from e
-        except Exception as e:
-            raise RuntimeError( f"Unexpected error during insert: {e}" ) from e
-            
+
     # update a record
     def update( self, table: str, where: List[WhereClause], data: Dict ) -> int:
 
         # if there's no data, we can't do anything
         if not data:
             raise ValueError( "No data provided for update" )
+        
+        debug_print_db(f"Updating records in table: {table}")
         
         # setup the set clause
         set_clause = ", ".join( [f"{key} = %s" for key in data.keys( )] )
@@ -750,11 +764,15 @@ class KP_DB:
             cursor.execute( query, params )
 
             # return the number of rows affected
-            return cursor.rowcount
+            rows_affected = cursor.rowcount
+            debug_print_db(f"Update completed, {rows_affected} rows affected")
+            return rows_affected
 
     # delete a record(s)
     def delete( self, table: str, where: List[WhereClause] ) -> int:
 
+        debug_print_db(f"Deleting records from table: {table}")
+        
         # setup the table
         full_table = f"{self.table_prefix}{table}" if self.table_prefix else table
 
@@ -771,10 +789,16 @@ class KP_DB:
             cursor.execute( query, where_params )
 
             # return the number of rows affected
-            return cursor.rowcount
+            rows_affected = cursor.rowcount
+            debug_print_db(f"Delete completed, {rows_affected} rows affected")
+            return rows_affected
 
     # call a stored procedure
     def call_proc(self, procedure_name: str, args=None, fetch: bool = False):
+        
+        debug_print_db(f"Calling stored procedure: {procedure_name}")
+        if args:
+            debug_print_db(f"Procedure arguments: {args}")
         
         # with our cursor
         with self._get_cursor( dictionary=True ) as cursor:
@@ -786,22 +810,31 @@ class KP_DB:
                 
                 # if we're not supposed to fetch anything
                 if not fetch:
-                    return cursor.rowcount
+                    rows_affected = cursor.rowcount
+                    debug_print_db(f"Procedure executed, {rows_affected} rows affected")
+                    return rows_affected
                 
-                # For procedures that return results, fetch them
+                # For procedures that return results
                 results = cursor.fetchall()
+                
+                debug_print_db(f"Procedure returned {len(results) if results else 0} rows")
+                    
+                # Return results
                 return results if results else None
                 
             # trapped an error
             except Exception as e:
-                
+                debug_print_db(f"Procedure call failed: {e}")
                 # Handle cases where there are no results to fetch
                 if not fetch:
-                    return cursor.rowcount
+                    debug_print_db("Procedure completed (no results to fetch)")
+                    return cursor.rowcount if hasattr(cursor, 'rowcount') else 0
                 return None
     
     # execute a raw query
     def execute_raw( self, query: str, params=None, fetch: bool = False, dictionary: bool = True ):
+        
+        debug_print_db(f"Executing raw query: {query[:100]}{'...' if len(query) > 100 else ''}")
         
         # with the cursor
         with self._get_cursor( dictionary=dictionary ) as cursor:
@@ -811,7 +844,9 @@ class KP_DB:
             
             # if we're not expected to return anything
             if not fetch:
-                return cursor.rowcount
+                rows_affected = cursor.rowcount
+                debug_print_db(f"Raw query executed, {rows_affected} rows affected")
+                return rows_affected
             
             # otherwise we can try
             try:
@@ -819,9 +854,11 @@ class KP_DB:
                 # setup the retults to be returned
                 results = cursor.fetchall( )
                 
+                debug_print_db(f"Raw query returned {len(results) if results else 0} rows")
                 # return them
                 return results if results else None
             
             # trapped an error
             except Exception:
+                debug_print_db("Raw query completed (no results available)")
                 return None
