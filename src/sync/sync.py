@@ -136,16 +136,10 @@ class KP_Sync:
         # otherwise, return the set default
         return default
 
-    # process a provider
     def _process_provider( self, _prov ):
-
-        # try to process
         try:
-
-            # with our database thread lockers
+            # Get filters
             with self._db_lock:
-
-                # try to grab the users filters
                 _filters = self._data._get_filters( _prov["u_id"] )
                 if _filters is None:
                     return ( 0, 0, _prov['sp_name'], "No filters found" )
@@ -156,33 +150,38 @@ class KP_Sync:
 
             # get the streams from the provider
             _streams = _get.get_streams( _prov )
+            #print(f"SYNC: Got {len(_streams)} streams from get_streams()")
             
             # setup the filtering
             from sync.filter import KP_Filter
 
             # filter the streams
             _filtered_streams = KP_Filter.filter_streams( _streams, _filters )
+            #print(f"SYNC: After filtering: {len(_filtered_streams)} streams remain")
 
             # now convert them to our common format
             _converted_streams = self._convert_streams( _filtered_streams, _prov )
+            #print(f"SYNC: After conversion: {len(_converted_streams)} streams to insert")
             
             # make sure we actually have converted streams
             if _converted_streams:
-
                 # with out database lock
                 with self._db_lock:
-
                     # insert the streams
                     self._data._insert_the_streams( _converted_streams )
+                    #print(f"SYNC: Successfully inserted {len(_converted_streams)} streams")
 
                     # update the last synced
                     self._data._update_last_synced( _prov["u_id"] )
+            #else:
+            #    print("SYNC: No converted streams to insert!")
             
             # return the streams
             return ( len( _streams ), len( _converted_streams ), _prov['sp_name'], None )
             
-        # whoops... 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             return ( 0, 0, _prov['sp_name'], str( e ) )
 
     # setup and format the final "report"

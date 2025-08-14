@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 
+import os
+os.environ['LC_ALL'] = 'en_US.UTF-8'
+os.environ['LANG'] = 'en_US.UTF-8'
+
 # Common imports
-import mysql.connector  # type: ignore
-from mysql.connector import Error, pooling  # type: ignore
+import pymysql
+import pymysql.cursors
 from typing import Iterator, Optional, Union, Dict, List, Any, Tuple, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
-import os
-os.environ['LANG'] = 'en_US.UTF-8'
+import threading
+import queue
+import time
 
 # Define enums for join types
 class JoinType( Enum ):
@@ -84,6 +89,78 @@ class OrderByClause:
     column: str
     direction: str = "ASC"
 
+# Simple connection pool implementation for PyMySQL
+class PyMySQLConnectionPool:
+    def __init__(self, pool_name: str, pool_size: int, **kwargs):
+        self.pool_name = pool_name
+        self.pool_size = pool_size
+        self.connection_kwargs = kwargs
+        self._pool = queue.Queue(maxsize=pool_size)
+        self._lock = threading.Lock()
+        self._created_connections = 0
+        
+        # Pre-populate the pool
+        for _ in range(pool_size):
+            self._create_connection()
+    
+    def _create_connection(self):
+        """Create a new connection and add it to the pool"""
+        try:
+            conn = pymysql.connect(**self.connection_kwargs)
+            self._pool.put(conn, block=False)
+            self._created_connections += 1
+        except queue.Full:
+            # Pool is full, close the connection
+            if conn:
+                conn.close()
+        except Exception as e:
+            raise ConnectionError(f"Failed to create connection: {e}")
+    
+    def get_connection(self):
+        """Get a connection from the pool"""
+        try:
+            # Try to get a connection from the pool (non-blocking)
+            conn = self._pool.get(block=False)
+            
+            # Check if connection is still alive
+            if not self._is_connection_alive(conn):
+                conn.close()
+                # Create a new connection
+                conn = pymysql.connect(**self.connection_kwargs)
+            
+            return conn
+        except queue.Empty:
+            # Pool is empty, create a new connection
+            return pymysql.connect(**self.connection_kwargs)
+    
+    def return_connection(self, conn):
+        """Return a connection to the pool"""
+        if self._is_connection_alive(conn):
+            try:
+                self._pool.put(conn, block=False)
+            except queue.Full:
+                # Pool is full, close the connection
+                conn.close()
+        else:
+            conn.close()
+    
+    def _is_connection_alive(self, conn):
+        """Check if a connection is still alive"""
+        try:
+            conn.ping(reconnect=False)
+            return True
+        except:
+            return False
+    
+    def close_all(self):
+        """Close all connections in the pool"""
+        while not self._pool.empty():
+            try:
+                conn = self._pool.get(block=False)
+                conn.close()
+            except queue.Empty:
+                break
+
 # Main database class
 class KP_DB:
 
@@ -110,8 +187,8 @@ class KP_DB:
         # if we have a connection pool
         if hasattr( self, 'connection_pool' ) and self.connection_pool is not None:
 
-            # nullify the connection pool
-            del self.connection_pool
+            # close all connections in the pool
+            self.connection_pool.close_all()
             self.connection_pool = None
 
     # context manager to handle the connection pool
@@ -124,30 +201,31 @@ class KP_DB:
         # if we have a connection pool
         if hasattr( self, 'connection_pool' ) and self.connection_pool is not None:
 
-            # nullify the connection pool
-            del self.connection_pool
+            # close all connections in the pool
+            self.connection_pool.close_all()
             self.connection_pool = None
 
     # initialize the connection pool
-    def _initialize_pool( self ) -> pooling.MySQLConnectionPool:
+    def _initialize_pool( self ) -> PyMySQLConnectionPool:
 
         # create the connection pool
         try:
 
             # create the connection pool with the provided configuration and return it
-            return mysql.connector.pooling.MySQLConnectionPool(
+            return PyMySQLConnectionPool(
                 pool_name="kptv_db_pool",
                 pool_size=self.pool_size,
                 host=self.host,
                 database=self.database,
                 user=self.user,
                 password=self.password,
-                pool_reset_session=True,
-                use_pure=True
+                charset='utf8mb4',
+                autocommit=False,
+                cursorclass=pymysql.cursors.DictCursor
             )
         
         # if we run into an error, raise a connection error
-        except Error as e:
+        except Exception as e:
             raise ConnectionError( f"Failed to create connection pool: {e}" )
 
     # context manager to handle the cursor
@@ -165,7 +243,10 @@ class KP_DB:
             conn = self._get_connection( )
 
             # get a cursor from the connection
-            cursor = conn.cursor( dictionary=dictionary, buffered=buffered )
+            if dictionary:
+                cursor = conn.cursor(pymysql.cursors.DictCursor)
+            else:
+                cursor = conn.cursor()
 
             # yield the cursor
             yield cursor
@@ -174,17 +255,17 @@ class KP_DB:
             conn.commit( )
 
         # if we run into an error, rollback the changes
-        except Error as e:
+        except Exception as e:
             if conn:
                 conn.rollback( )
             raise RuntimeError( f"Database error: {e}" )
         
-        # and finally, close the cursor and connection
+        # and finally, close the cursor and return connection to pool
         finally:
             if cursor:
                 cursor.close( )
             if conn:
-                conn.close( )
+                self.connection_pool.return_connection(conn)
 
     # execute a query with the cursor
     def _execute( self, query: str, params=None, fetch: bool = True, dictionary: bool = True, stream: bool = False ) -> Any:
@@ -373,7 +454,7 @@ class KP_DB:
             # the connection
             conn = self._get_connection()
 
-            # yield the connection pool
+            # yield the connection
             yield conn
 
             # commit the transaction
@@ -387,10 +468,10 @@ class KP_DB:
                 conn.rollback( )
             raise
 
-        # and finally, close the connection
+        # and finally, return connection to pool
         finally:
             if conn:
-                conn.close( )
+                self.connection_pool.return_connection(conn)
     
     # get a connection from the pool
     def _get_connection( self ):
@@ -402,14 +483,14 @@ class KP_DB:
             conn = self.connection_pool.get_connection( )
 
             # double check that we actually have a connection and return it
-            if conn.is_connected( ):
+            if conn.open:
                 return conn
             
             # whoops...  error
             raise ConnectionError( "Failed to establish database connection" )
         
         # if there was an error
-        except Error as e:
+        except Exception as e:
             raise ConnectionError( f"Error getting connection from pool: {e}" )
 
     # get a single record for the query
@@ -581,10 +662,10 @@ class KP_DB:
                             inserted_ids.append( cursor.lastrowid )
 
                         # try to trap errors
-                        except mysql.connector.Error as e:
+                        except pymysql.Error as e:
 
                             # ignore duplicates
-                            if ignore_duplicates and e.errno == 1062:  # Duplicate key error
+                            if ignore_duplicates and e.args[0] == 1062:  # Duplicate key error
                                 continue
                             raise
 
@@ -610,17 +691,17 @@ class KP_DB:
                             cursor.executemany( base_query, batch )
 
                         # trap errors
-                        except mysql.connector.Error as e:
+                        except pymysql.Error as e:
 
                             # if we're configured to ignore duplicate records
-                            if ignore_duplicates and e.errno == 1062:
+                            if ignore_duplicates and e.args[0] == 1062:
 
                                 # Fall back to individual inserts for the failed batch
                                 for value in batch:
                                     try:
                                         cursor.execute( base_query, value )
-                                    except mysql.connector.Error as e:
-                                        if ignore_duplicates and e.errno == 1062:
+                                    except pymysql.Error as e:
+                                        if ignore_duplicates and e.args[0] == 1062:
                                             continue
                                         raise
                              # otherwise raise an error
@@ -629,10 +710,10 @@ class KP_DB:
                     # return nothing
                     return None
         # trap errors
-        except mysql.connector.Error as e:
+        except pymysql.Error as e:
 
             # check if we're ignoring duplicates
-            if ignore_duplicates and e.errno == 1062:
+            if ignore_duplicates and e.args[0] == 1062:
                 return [] if return_ids else None
             
             # otherwise... 
@@ -695,7 +776,7 @@ class KP_DB:
     # call a stored procedure
     def call_proc(self, procedure_name: str, args=None, fetch: bool = False):
         
-        # with our cursoe
+        # with our cursor
         with self._get_cursor( dictionary=True ) as cursor:
 
             # try to call the procedure
@@ -705,28 +786,14 @@ class KP_DB:
                 
                 # if we're not supposed to fetch anything
                 if not fetch:
-
-                    # For execute-only, consume any results to ensure execution
-                    while cursor.nextset( ):
-                        pass
                     return cursor.rowcount
                 
-                # For procedures that return results
-                results = []
-
-                # loop over the retuls
-                for result in cursor.stored_results( ):
-
-                    # append to the return
-                    results.append( result.fetchall( ) )
-                    
-                # Return simplified form if single empty result
-                if len( results ) == 1 and not results[0]:
-                    return None
-                return results[0] if len( results ) == 1 else results
+                # For procedures that return results, fetch them
+                results = cursor.fetchall()
+                return results if results else None
                 
             # trapped an error
-            except mysql.connector.errors.InterfaceError:
+            except Exception as e:
                 
                 # Handle cases where there are no results to fetch
                 if not fetch:
@@ -744,10 +811,6 @@ class KP_DB:
             
             # if we're not expected to return anything
             if not fetch:
-
-                # Consume all results for execute-only
-                while cursor.nextset( ):
-                    pass
                 return cursor.rowcount
             
             # otherwise we can try
@@ -760,6 +823,5 @@ class KP_DB:
                 return results if results else None
             
             # trapped an error
-            except mysql.connector.errors.InterfaceError:
+            except Exception:
                 return None
-            

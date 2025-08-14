@@ -1,3 +1,7 @@
 .conf
 kptv.spec
-
+log.txt
+check_config.py
+src/db/usage
+src/utils/cache_usage
+src/utils/request_usage

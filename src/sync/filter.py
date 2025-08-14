@@ -17,8 +17,14 @@ class KP_Filter:
             _pattern = regex.compile( pattern, regex.IGNORECASE )
             
             # Return True if ANY matches found (> 0 instead of > 1)
-            return bool( _pattern.findall( text ) )
-        except:
+            result = bool( _pattern.findall( text ) )
+            
+            # DEBUG: Print pattern matching details
+            #print(f"  PATTERN DEBUG: '{pattern}' vs '{text}' = {result}")
+            
+            return result
+        except Exception as e:
+            print(f"  PATTERN ERROR: '{pattern}' vs '{text}' - {e}")
             return False
         
     # filter the normalized streams
@@ -27,10 +33,21 @@ class KP_Filter:
         
         # if there aren't any filters
         if not db_filters:
+            #print("FILTER DEBUG: No filters found")
             return normalized_data
+        
+        # DEBUG: Show filter summary
+        include_filters = [f for f in db_filters if f["sf_type_id"] == 0]
+        exclude_filters = [f for f in db_filters if f["sf_type_id"] != 0]
+        #print(f"FILTER DEBUG: {len(include_filters)} include filters, {len(exclude_filters)} exclude filters")
+        
+        #for i, inc_filter in enumerate(include_filters):
+        #    print(f"  Include Filter {i+1}: '{inc_filter['sf_filter']}'")
         
         # hold the returnable streams
         filtered_streams = {}
+        include_count = 0
+        exclude_count = 0
         
         # loop the originating data
         for stream_id, stream in normalized_data.items( ):
@@ -38,6 +55,10 @@ class KP_Filter:
             # hold the name, url and group
             stream_name = stream["stream_name"]
             stream_url = stream["stream_url"]
+            
+            # DEBUG: Show first few streams being processed
+            #if len(filtered_streams) < 5:
+            #    print(f"\nFILTER DEBUG: Processing stream '{stream_name}'")
             
             # Check includes first
             is_included = any(
@@ -49,6 +70,9 @@ class KP_Filter:
             # if it's supposed to be included, add the stream and skip the excludes
             if is_included:
                 filtered_streams[stream_id] = stream
+                include_count += 1
+                #if include_count <= 5:  # Show first few included streams
+                #    print(f"  INCLUDED: '{stream_name}'")
                 continue
 
             # Default exclusion flag
@@ -83,7 +107,14 @@ class KP_Filter:
             # if the stream should NOT be included, add it to the return
             if not should_exclude:
                 filtered_streams[stream_id] = stream
+            else:
+                exclude_count += 1
+        
+        print(f"\nFILTER SUMMARY:")
+        print(f"  Input streams: {len(normalized_data)}")
+        print(f"  Included by include filters: {include_count}")
+        print(f"  Excluded by exclude filters: {exclude_count}")
+        print(f"  Final output streams: {len(filtered_streams)}")
         
         # return the filtered streams
         return filtered_streams
-    
