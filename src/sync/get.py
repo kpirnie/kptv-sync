@@ -84,7 +84,7 @@ class KP_Get:
         lines = m3u_content.splitlines()
         
         # Precompile regex patterns
-        extinf_pattern = re.compile(r'#EXTINF:-1\s*(.*?),(.*)')  # More flexible spacing
+        extinf_pattern = re.compile(r'#EXTINF:([-+]?\d*\.?\d+)(?:\s*(.*?),)?(.*)')  # Fixed pattern
         group_title_pattern = re.compile(r'group-title="([^"]*)"')
         tvg_id_pattern = re.compile(r'tvg-id="([^"]*)"')
         tvg_logo_pattern = re.compile(r'tvg-logo="([^"]*)"')
@@ -98,15 +98,18 @@ class KP_Get:
             if not line:  # Skip empty lines
                 continue
                 
-            if line.startswith('#EXTINF:-1'):
+            if line.startswith('#EXTINF:'):  # Changed from '#EXTINF:-1'
                 # New stream entry
                 current_stream = {}
                 
                 # Parse EXTINF line
                 match = extinf_pattern.match(line)
                 if match:
-                    attrs, name = match.groups()
+                    duration, attrs, name = match.groups()
                     current_stream['name'] = name.strip()
+                    
+                    # Handle case where attrs is None
+                    attrs = attrs or ""
                     
                     # Parse attributes
                     group_match = group_title_pattern.search(attrs)
@@ -166,6 +169,7 @@ class KP_Get:
         
         debug_print_sync(f"M3U parsing completed: {processed_streams} streams processed")
         return normalized or None
+    
 
     # normalize the data
     def _normalize_data( self, data: Union[List[Dict[str, Any]], str], data_type: str, provider: Dict[str, Any], ) -> Optional[Dict[str, Dict[str, Any]]]:
