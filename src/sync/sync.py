@@ -130,7 +130,7 @@ class KP_Sync:
 
                 # clean up the streams
                 debug_print_sync("Cleaning up streams")
-                self.cleanup( )
+                self._data._cleanup( )
 
                 # attempt to fix up some data in the streams
                 debug_print_sync("Running fixup operations")
