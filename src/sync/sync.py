@@ -6,6 +6,8 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import time
+from datetime import datetime
+from collections import defaultdict
 
 # Import debug utilities
 try:
@@ -145,17 +147,223 @@ class KP_Sync:
         # Show final summary
         self._print_final_summary( results, time.time( ) - start_time, has_errors )
 
-    # clean up the data
-    def cleanup( self ):
+    # test streams for validity
+    def test_streams( self ):
         
-        debug_print_sync("Running cleanup operations")
-        # run it
-        self._data._cleanup( )
+        debug_print_sync("Starting stream testing operation")
+        
+        # get active streams with provider info
+        streams = self._data._get_active_streams()
+        if not streams:
+            self.common.kp_print( "error", "No active streams found" )
+            return
+
+        debug_print_sync(f"Found {len(streams)} active streams to test")
+
+        # Group streams by provider for display
+        provider_groups = defaultdict(list)
+        provider_info = {}
+        
+        for stream in streams:
+            provider_id = stream['p_id']
+            provider_groups[provider_id].append(stream)
+            
+            if provider_id not in provider_info:
+                provider_info[provider_id] = {
+                    'name': stream['sp_name'],
+                    'cnx_limit': stream['sp_cnx_limit'],
+                    'stream_count': 0
+                }
+            
+            provider_info[provider_id]['stream_count'] += 1
+
+        # Show initial test message
+        self.common.kp_print_line( )
+        self.common.kp_print( "info", "STARTING STREAM TESTING" )
+        self.common.kp_print( "info", f"Testing {len(streams)} active streams from {len(provider_groups)} providers" )
+        
+        # Show provider info
+        for provider_id, info in provider_info.items():
+            self.common.kp_print( "info", f"- {info['name']}: {info['stream_count']} streams (limit: {info['cnx_limit']} connections)" )
+
+        # hold our start time
+        start_time = time.time( )
+
+        # Initialize results tracking
+        tested_count = 0
+        valid_count = 0
+        invalid_count = 0
+        invalid_streams = []  # For logging
+        
+        # Create log file with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_filename = f"invalid_streams_{timestamp}.log"
+        
+        debug_print_sync("Starting thread pool execution for stream testing")
+        
+        # Use simpler threading approach
+        with ThreadPoolExecutor( max_workers=4 ) as executor:
+
+            futures = {executor.submit( self._test_single_stream_simple, stream ): stream['id'] 
+                      for stream in streams}
+            
+            debug_print_sync(f"Submitted {len(futures)} stream testing tasks")
+            
+            # for each completed test
+            for future in as_completed( futures, timeout=7200 ):
+
+                try:
+                    stream_data, is_valid, error = future.result( )
+                    tested_count += 1
+
+                    if is_valid:
+                        valid_count += 1
+                        debug_print_sync(f"Stream {stream_data['id']} is valid")
+                    else:
+                        invalid_count += 1
+                        invalid_streams.append((stream_data, error))
+                       
+                        debug_print_sync(f"Stream {stream_data['id']} is invalid: {error}")
+
+                    # Progress update every 100 streams
+                    if tested_count % 100 == 0:
+                        progress_msg = f"Progress: {tested_count}/{len(streams)} tested ({valid_count} valid, {invalid_count} invalid)"
+                        self.common.kp_print( "info", progress_msg )
+
+                except Exception as e:
+                    debug_print_sync(f"Error testing stream: {e}")
+                    invalid_count += 1
+
+        debug_print_sync("Thread pool execution completed for stream testing")
+
+        # Write invalid streams to log file
+        if invalid_streams:
+            try:
+                with open(log_filename, 'w', encoding='utf-8') as log_file:
+                    log_file.write(f"Invalid Streams Log - Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    log_file.write("=" * 80 + "\n\n")
+                    
+                    for stream_data, error in invalid_streams:
+                        log_file.write(f"ID: {stream_data['id']}\n")
+                        log_file.write(f"Name: {stream_data['s_orig_name']}\n")
+                        log_file.write(f"URL: {stream_data['s_stream_uri']}\n")
+                        log_file.write(f"Provider: {stream_data.get('sp_name', 'Unknown')}\n")
+                        log_file.write(f"Error: {error}\n")
+                        log_file.write("-" * 40 + "\n")
+                        
+                debug_print_sync(f"Invalid streams logged to: {log_filename}")
+            except Exception as e:
+                self.common.kp_print( "error", f"Failed to write log file: {str(e)}" )
+
+    # fix invalid streams from log file
+    def fix_from_log( self ):
+        
+        debug_print_sync("Starting fix from log operation")
+        
+        # Find the most recent log file
+        log_file = self._find_latest_log_file()
+        if not log_file:
+            self.common.kp_print( "error", "No invalid streams log file found" )
+            return
+        
+        self.common.kp_print_line( )
+        self.common.kp_print( "info", "FIXING INVALID STREAMS FROM LOG" )
+        self.common.kp_print( "info", f"Using log file: {log_file}" )
+        self.common.kp_print_line( )
+        
+        # Parse the log file to extract stream IDs
+        stream_ids = self._parse_log_file(log_file)
+        if not stream_ids:
+            self.common.kp_print( "error", "No stream IDs found in log file" )
+            return
+        
+        self.common.kp_print( "info", f"Found {len(stream_ids)} invalid streams to move" )
+        
+        # Move the streams in batch
+        start_time = time.time()
+        try:
+            moved_count = self._data._batch_move_streams_to_other(stream_ids)
+            
+            # Show final summary
+            self.common.kp_print_line( )
+            self.common.kp_print( "info", "FIX FROM LOG SUMMARY" )
+            self.common.kp_print_line( )
+            self.common.kp_print( "info", f"Log file processed: {log_file}" )
+            self.common.kp_print( "info", f"Streams to move: {len(stream_ids)}" )
+            self.common.kp_print( "info", f"Streams moved: {moved_count}" )
+            self.common.kp_print( "info", f"Total time: {time.time() - start_time:.1f} seconds" )
+            
+            if moved_count == len(stream_ids):
+                self.common.kp_print( "success", "ALL INVALID STREAMS MOVED SUCCESSFULLY" )
+            else:
+                self.common.kp_print( "warn", f"PARTIAL SUCCESS - {moved_count}/{len(stream_ids)} STREAMS MOVED" )
+            
+            self.common.kp_print_line( )
+            
+        except Exception as e:
+            self.common.kp_print( "error", f"Failed to move streams: {str(e)}" )
+            debug_print_sync(f"Fix from log failed: {e}")
+
+    def _find_latest_log_file( self ):
+        """Find the most recent invalid_streams_*.log file"""
+        import glob
+        import os
+        
+        # Look for log files in current directory
+        log_pattern = "invalid_streams_*.log"
+        log_files = glob.glob(log_pattern)
+        
+        if not log_files:
+            debug_print_sync("No log files found matching pattern: " + log_pattern)
+            return None
+        
+        # Sort by modification time (newest first)
+        log_files.sort(key=os.path.getmtime, reverse=True)
+        latest_log = log_files[0]
+        
+        debug_print_sync(f"Found {len(log_files)} log files, using latest: {latest_log}")
+        return latest_log
+
+    def _parse_log_file( self, log_file ):
+        """Parse log file to extract stream IDs"""
+        stream_ids = []
+        
+        debug_print_sync(f"Parsing log file: {log_file}")
+        
+        try:
+            with open(log_file, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            
+            for line in lines:
+                line = line.strip()
+                # Look for lines that start with "ID: "
+                if line.startswith("ID: "):
+                    try:
+                        stream_id = int(line[4:])  # Extract ID after "ID: "
+                        stream_ids.append(stream_id)
+                        debug_print_sync(f"Extracted stream ID: {stream_id}")
+                    except ValueError:
+                        debug_print_sync(f"Could not parse stream ID from line: {line}")
+                        continue
+
+            debug_print_sync("Running cleanup operations")
+
+            # run it
+            self._data._cleanup( )
+            
+            debug_print_sync(f"Parsed {len(stream_ids)} stream IDs from log file")
+            return stream_ids
+            
+        except Exception as e:
+            debug_print_sync(f"Error parsing log file {log_file}: {e}")
+            return []
+        
 
     # fixup the data
     def fixup( self ):
 
         debug_print_sync("Running fixup operations")
+        
         # run it
         self._data._fixup( )
 
@@ -173,6 +381,43 @@ class KP_Sync:
         # otherwise, return the set default
         debug_print_sync(f"Using default thread count: {default}")
         return default
+
+    # test a single stream
+    def _test_single_stream( self, stream_data, provider_semaphores ):
+        
+        debug_print_sync(f"Testing stream: {stream_data['id']}")
+        
+        try:
+            from sync.test import KP_StreamTester
+            tester = KP_StreamTester()
+            
+            # Set provider semaphores in the tester
+            tester.set_provider_semaphores(provider_semaphores)
+            
+            is_valid, error = tester.test_stream(stream_data)
+            
+            return stream_data, is_valid, error
+            
+        except Exception as e:
+            debug_print_sync(f"Error testing stream {stream_data['id']}: {e}")
+            return stream_data, False, f"Testing error: {str(e)}"
+
+    # Simple test method without semaphores (fallback)
+    def _test_single_stream_simple( self, stream_data ):
+        
+        debug_print_sync(f"Testing stream (simple): {stream_data['id']}")
+        
+        try:
+            from sync.test import KP_StreamTester
+            tester = KP_StreamTester()
+            
+            is_valid, error = tester.test_stream(stream_data)
+            
+            return stream_data, is_valid, error
+            
+        except Exception as e:
+            debug_print_sync(f"Error testing stream {stream_data['id']}: {e}")
+            return stream_data, False, f"Testing error: {str(e)}"
 
     # process a provider
     def _process_provider( self, _prov ):
@@ -290,6 +535,40 @@ class KP_Sync:
         # otherwise
         else:
             self.common.kp_print( "success", "SYNC COMPLETED SUCCESSFULLY" )
+            
+        self.common.kp_print_line( )
+
+    # setup and format the test summary
+    def _print_test_summary( self, tested_count, valid_count, invalid_count, moved_count, total_time, log_filename, fix_mode ):
+        
+        self.common.kp_print_line( )
+        self.common.kp_print("info", "STREAM TESTING SUMMARY")
+        self.common.kp_print_line( )
+        
+        self.common.kp_print( "info", "STATISTICS:" )
+        self.common.kp_print( "info", f"Total streams tested: {tested_count}" )
+        self.common.kp_print( "info", f"Valid streams: {valid_count}" )
+        self.common.kp_print( "info", f"Invalid streams: {invalid_count}" )
+        
+        if fix_mode:
+            self.common.kp_print( "info", f"Streams moved to other table: {moved_count}" )
+        
+        if tested_count > 0:
+            validity_percentage = (valid_count / tested_count) * 100
+            self.common.kp_print( "info", f"Validity rate: {validity_percentage:.1f}%" )
+        
+        self.common.kp_print( "info", f"Total time: {total_time:.1f} seconds" )
+        
+        if log_filename:
+            self.common.kp_print( "info", f"Invalid streams logged to: {log_filename}" )
+        
+        if invalid_count == 0:
+            self.common.kp_print( "success", "ALL STREAMS ARE VALID" )
+        else:
+            status_msg = f"TESTING COMPLETED - {invalid_count} INVALID STREAMS FOUND"
+            if fix_mode:
+                status_msg += f" AND {moved_count} MOVED"
+            self.common.kp_print( "warn", status_msg )
             
         self.common.kp_print_line( )
 

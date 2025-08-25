@@ -58,6 +58,7 @@ class KP_Common:
         _args.add_argument( "--vod", action="store_true", help=SUPPRESS )
         _args.add_argument( "--provider", type=int, help=SUPPRESS )
         _args.add_argument( "--debug", action="store_true", help=SUPPRESS )
+        _args.add_argument( "--fix", action="store_true", help=SUPPRESS )
 
         # Safe init
         _the_args = None
@@ -90,9 +91,16 @@ class KP_Common:
             sys.exit( )
 
         # Validate action manually
-        if _action not in ['sync', 'fixup']:
+        if _action not in ['sync', 'fixup', 'teststreams']:
             print("*" * 76)
             self.kp_print("error", f"'{_action}' is not a valid action.")
+            self.custom_help( )
+            sys.exit()
+
+        # Validate --fix can only be used with teststreams
+        if _the_args.fix and _action != 'teststreams':
+            print("*" * 76)
+            self.kp_print("error", "--fix can only be used with teststreams action.")
             self.custom_help( )
             sys.exit()
 
@@ -103,7 +111,7 @@ class KP_Common:
     # our custom help message
     def custom_help( self ):
         print( "*" * 76 )
-        print( '''usage: \033[92m./main.py [-h] -a {sync,fixup} [options]\033[37m
+        print( '''usage: \033[92m./main.py [-h] -a {sync,fixup,teststreams} [options]\033[37m
 \t\033[94msync\033[37m: Sync the streams from the providers to the stream manager.
 \t\t\033[93mOPTIONS:\033[37m
 \t\t\t\033[94m--live\033[37m Sync all live streams.
@@ -112,6 +120,10 @@ class KP_Common:
 \t\t\t\033[94m--provider [###]\033[37m Sync only the streams for the specified provider id.              
 \t\033[94mfixup\033[37m: Fix all streams.
 \t\tThis attempts to match channel numbers, logos, and tvg-id's for all streams.
+\t\033[94mteststreams\033[37m: Test all active live and series streams for validity.
+\t\tThis tests each stream URL to verify it contains valid video data.
+\t\t\t\033[94m--fix\033[37m Move invalid streams to the other table.
+\t\t\tThis reads the latest invalid_streams_*.log file and moves those streams.
 ''' )
         print( "*" * 76 )
 

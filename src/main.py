@@ -61,6 +61,27 @@ try:
             debug_print("Fixup operation completed")
             sys.exit( )
 
+        # test the streams
+        case "teststreams":
+
+            debug_print("Starting stream testing operation")
+            
+            # now fix the streams if we have the flah added
+            fix_mode = hasattr(common.args, 'fix') and common.args.fix
+            if fix_mode:
+                sync.fix_from_log( )
+
+            else:
+                # test the streams
+                sync.test_streams( )
+
+            # clean up
+            del sync
+
+            debug_print("Stream testing operation completed")
+            sys.exit( )
+
+
         # if we don't have a match, show the help
         case _:
 

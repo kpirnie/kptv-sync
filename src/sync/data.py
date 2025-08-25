@@ -202,3 +202,78 @@ class KP_Sync_Data:
 
         # return the filters
         return _ret
+    
+    # get active streams for testing
+    def _get_active_streams( self ):
+
+        debug_print_sync("Getting active streams with provider info for testing")
+
+        # with our database class
+        with KP_DB( ) as db:
+
+            # setup the where clause for active live and series streams
+            where = [
+                WhereClause(
+                    field="s.s_active", 
+                    value=1,
+                    operator=ComparisonOperator.EQ
+                ),
+                WhereClause(
+                    field="s.s_type_id", 
+                    value=[0, 5],
+                    operator=ComparisonOperator.IN,
+                    connector="AND"
+                ),
+            ]
+
+            # get the active stream records with provider connection limit info
+            query = f"""
+            SELECT s.id, s.s_orig_name, s.s_stream_uri, s.s_type_id, s.p_id,
+                   p.sp_cnx_limit, p.sp_name
+            FROM {db.table_prefix}streams s
+            INNER JOIN {db.table_prefix}stream_providers p ON s.p_id = p.id
+            WHERE s.s_active = 1 AND s.s_type_id IN (0, 5)
+            """
+            
+            streams = db.execute_raw(query, fetch=True, dictionary=True)
+
+        debug_print_sync(f"Retrieved {len(streams)} active streams with provider info from database")
+
+        return streams
+
+    # batch move invalid streams to other table
+    def _batch_move_streams_to_other( self, stream_ids: list ):
+
+        if not stream_ids:
+            return
+
+        debug_print_db(f"Batch moving {len(stream_ids)} streams to other table")
+
+        # with our database class
+        with KP_DB( ) as db:
+
+            # Process in chunks to avoid overwhelming the database
+            chunk_size = 100
+            moved_count = 0
+            
+            for i in range(0, len(stream_ids), chunk_size):
+                chunk = stream_ids[i:i + chunk_size]
+                
+                debug_print_db(f"Processing chunk {i//chunk_size + 1}: {len(chunk)} streams")
+                
+                # Use a single transaction for the chunk
+                try:
+                    with db.transaction():
+                        for stream_id in chunk:
+                            db.call_proc( "Streams_Move_To_Other", args=[stream_id], fetch=False )
+                            moved_count += 1
+                            
+                    debug_print_db(f"Successfully moved chunk of {len(chunk)} streams")
+                    
+                except Exception as e:
+                    debug_print_db(f"Error moving chunk starting at {i}: {e}")
+                    # Continue with next chunk even if this one fails
+                    continue
+            
+        debug_print_db(f"Batch move completed: {moved_count} streams moved to other table")
+        return moved_count
